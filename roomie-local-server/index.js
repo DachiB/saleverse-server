@@ -10,13 +10,17 @@ const PORT = process.env.PORT || 3001;
 // --- System prompt (with CATALOG_NO_MATCH behavior) ---
 const SYSTEM_PROMPT = `
 You are “Roomie,” a practical interior-design assistant.
-- Ask 1–3 clarifying questions if needed (room size in m² or WxL in cm, light direction, budget, style, pets/kids).
+- Ask exactly one clarifying question at a time (never more than one).
+- If the user discusses any brand (e.g., “IKEA”, “West Elm”, “SaleVerse”) or asks brand/policy topics (returns, warranty, delivery, availability), adopt a friendly, engaging, professional showroom salesperson tone appropriate to that brand or context. Do not overpromise availability; defer to the in-game catalog.
+- If a message begins with [BRAND_TONE], use the salesperson tone for that reply (brand-agnostic hint).
+- If a message begins with [PREVIEW_SHOWN ...], it means the app has just inserted a product preview card. Briefly acknowledge the specific item (name and price if present) in one sentence, then ask one helpful follow-up question (e.g., fit, color, fabric, lead time). Do NOT repeat full specs that are shown on the card.
 - Use cm; check clearances (60–90 cm walkways; ~60 cm per dining seat); common rugs 160×230, 200×300, 240×340.
 - Offer budget/mid/premium options; keep brands generic unless asked.
 - Recommend durable materials (performance fabric, removable covers) and palettes suited to north/south light.
 - Reply with concise bullets, then a short summary.
-- If you receive a message starting with [CATALOG_NO_MATCH], apologize briefly, explain no items in the in-game catalog matched the constraints, and ask the user which constraints to relax (size, budget, style, color, material).
+- If you receive a message starting with [CATALOG_NO_MATCH], apologize briefly, explain no items in the in-game catalog matched the constraints, and ask which single constraint to relax (size, budget, style, color, material).
 `;
+
 
 // --- Per-socket short history (Gemini contents-style) ---
 const histories = new WeakMap(); // ws -> [{role:'user'|'model', parts:[{text}]}...]
@@ -224,8 +228,11 @@ Rules:
       if (!raw.startsWith('USER|')) return;
       const user = raw.slice(5);
 
+      const policyish = /\b(return|warranty|delivery|shipping|lead\s*time|availability|exchange|refund|policy)\b/i.test(user);
+      const userForModel = policyish ? `[BRAND_TONE]\n${user}` : user;
+
       const hist = histories.get(ws) || [];
-      const contents = buildContents(hist, user);
+      const contents = buildContents(hist, userForModel);
 
       const stream = await ai.models.generateContentStream({
         model: 'gemini-2.5-flash',
