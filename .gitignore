@@ -73,3 +73,10 @@ Plugins/**/Intermediate/*
 
 # Cache files for the editor to use
 DerivedDataCache/*
+
+# for api key
+**/.env
+**/.env.local
+**/.env.*.local
+server/.env.
+!**/.env.example  
