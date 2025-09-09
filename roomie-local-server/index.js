@@ -7,21 +7,29 @@ import { GoogleGenAI } from '@google/genai';
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const PORT = process.env.PORT || 3001;
 
-// --- System prompt ---
+// --- System prompt (unified salesperson tone + one question) ---
 const SYSTEM_PROMPT = `
-You are “Roomie,” a practical interior-design assistant.
+You are “Roomie,” a friendly, engaging, professional showroom salesperson for home interiors.
+Your goal is to help the user make confident purchase decisions while giving creative, practical design advice.
 
-- Ask exactly one clarifying question at a time (never more than one).
-- Provide creative design advice when appropriate: suggest layout ideas, color palettes, style pairings, and practical tips (traffic flow, sightlines, focal points). Keep it concise and useful.
-- If the user discusses any brand (e.g., “IKEA”, “West Elm”, “SaleVerse”) or asks brand/policy topics (returns, warranty, delivery, availability), adopt a friendly, engaging, professional showroom salesperson tone appropriate to that brand or context. Do not overpromise availability; defer to the in-game catalog.
-- If a message begins with [BRAND_TONE], use the salesperson tone for that reply (brand-agnostic hint).
-- If a message begins with [PREVIEW_SHOWN ...], it means the app has just inserted a product preview card. Briefly acknowledge the specific item (name and price if present) in one sentence, then ask one helpful follow-up question (e.g., fit, color, fabric, lead time). Do NOT repeat full specs that are shown on the card.
+Behavior:
+- Always keep a supportive, concise salesperson tone (never pushy).
+- Ask exactly one clarifying question per message. If you need several answers, ask them across separate turns.
+- Provide creative design advice when appropriate: layout ideas, color palettes, style pairings, and practical tips (traffic flow, sightlines, focal points). Keep it concise and useful.
+- Do not overpromise availability; defer to the in-game catalog and previews shown in the app.
 
+UI coordination tags:
+- If a message begins with [PREVIEW_SHOWN ...], the app has just inserted a product preview card. Briefly acknowledge the item (name/price if present), then ask one helpful follow-up (do NOT restate full specs).
+- If a message begins with [CART_UPDATED ...], acknowledge the change and ask one helpful follow-up.
+- If a message begins with [CHECKOUT_STARTED], guide the user through confirming their cart and next steps briefly (still one question).
+- If a message begins with [ORDER_CREATED ...], congratulate and offer clear next steps (receipt, tracking, continue browsing).
+- If you receive a message starting with [CATALOG_NO_MATCH], apologize briefly, explain no items matched the constraints, and ask which single constraint to relax (size, budget, style, color, material).
+
+Formatting:
+- Reply with concise bullets, then a short summary.
 - Use cm; check clearances (60–90 cm walkways; ~60 cm per dining seat); common rugs 160×230, 200×300, 240×340.
 - Offer budget/mid/premium options; keep brands generic unless asked.
 - Recommend durable materials (performance fabric, removable covers) and palettes suited to north/south light.
-- Reply with concise bullets, then a short summary.
-- If you receive a message starting with [CATALOG_NO_MATCH], apologize briefly, explain no items in the in-game catalog matched the constraints, and ask which single constraint to relax (size, budget, style, color, material).
 `;
 
 // --- Per-socket short history (Gemini contents-style) ---
@@ -46,7 +54,7 @@ const clampHistory = (hist, maxPairs = 6) => {
   while (hist.length > maxMsgs) hist.shift();
 };
 
-// --- Heuristics for SPEC backups ---
+// --- Heuristics for SPEC backups (manual, predictable) ---
 const CATEGORY_MAP = {
   'sofa': ['couch', 'settee', 'sectional', 'loveseat'],
   'rug': ['carpet'],
@@ -65,7 +73,7 @@ const CATEGORY_MAP = {
 };
 const INTENT_WORDS = [
   'suggest','recommend','pick','choose','find','show me','find me',
-  'any sofa','any rug','show a','show me a','show me some','which would you recommend'
+  'any sofa','any rug','show a','show me a','show me some','which would you recommend','i need a','i need an'
 ];
 const inferCategory = (txt) => {
   for (const cat of Object.keys(CATEGORY_MAP)) {
@@ -76,63 +84,52 @@ const inferCategory = (txt) => {
 };
 const inferIntent = (txt) => INTENT_WORDS.some(w => txt.includes(w));
 
-// --- Detect "brand info / comparison / policy" asks -> should NOT auto-suggest ---
+// Treat these as info/comparison/logistics → do NOT auto-suggest
 const brandInfoLike = (t) =>
-  /\b(tell me about|what sets|what makes|how.*different|compare|comparison|pros|cons|policy|return|warranty|delivery|shipping|lead\s*time|availability|brand)\b/i
+  /\b(tell me about|what sets|what makes|how.*different|compare|comparison|pros|cons|policy|return|warranty|delivery|shipping|lead\s*time|availability)\b/i
     .test(t);
 
-// --- Helpers: budget normalization ---
+// Size-ish hints (loosely)
+const hasSizeHints = (t) =>
+  /\b(width|length|depth|height|cm|mm|\d{2,3}\s*x\s*\d{2,3})\b/i.test(t);
+
+// --- Helpers: numeric normalization ---
 function toNumberLoose(x) {
   if (typeof x === 'number') return x;
   if (typeof x !== 'string') return 0;
   let s = x.trim().toLowerCase();
-  s = s.replace(/gel|usd|eur|gbp|₾|\$|€|£/g, ''); // strip currencies
-  s = s.replace(/,/g, '').replace(/\s+/g, '');   // strip commas/spaces
-  let mult = 1;
-  if (s.endsWith('k')) { mult = 1000; s = s.slice(0, -1); } // 1.2k
+  s = s.replace(/gel|usd|eur|gbp|try|aud|cad|inr|jpy|cny|rmb|yuan|yen|tl|lira|dollars?|bucks?|quid|₾|\$|€|£|¥|₹|₺|₽|₩/g, '');
+  s = s.replace(/,/g, '').replace(/\s+/g, '');
+  if (s.endsWith('k')) s = String(parseFloat(s) * 1000);
   const v = parseFloat(s);
-  return Number.isFinite(v) ? v * mult : 0;
+  return Number.isFinite(v) ? v : 0;
 }
 
 function extractBudget(text) {
-  // 1) Lowercase + normalize hyphens (—, –) to '-'
   const raw = String(text || '').toLowerCase().replace(/[—–]/g, '-');
-
-  // 2) Remove common currency symbols/words so "$900" → "900"
   const t = raw
     .replace(/gel|usd|eur|gbp|try|aud|cad|inr|jpy|cny|rmb|yuan|yen|tl|lira|dollars?|bucks?|quid|₾|\$|€|£|¥|₹|₺|₽|₩/g, '')
-    .replace(/,/g, '')               // strip thousands separators
-    .replace(/\s+/g, ' ')            // collapse spaces
-    .trim();
+    .replace(/,/g, '').replace(/\s+/g, ' ').trim();
 
-  const num = '([0-9]*\\.?[0-9]+k?)'; // supports 1.2k
+  const num = '([0-9]*\\.?[0-9]+k?)';
 
-  // between / from ... to ...
   let m = t.match(new RegExp(`(?:between|from)\\s+${num}\\s*(?:to|and|-)\\s*${num}`, 'i'));
   if (m) return { min: toNumberLoose(m[1]), max: toNumberLoose(m[2]) };
 
-  // 500-800 (range shorthand)
   m = t.match(new RegExp(`${num}\\s*-\\s*${num}`));
   if (m) return { min: toNumberLoose(m[1]), max: toNumberLoose(m[2]) };
 
-  // under / below / up to / max / <= / less than / no more than / capped at
   m = t.match(new RegExp(`(?:under|below|up\\s*to|upto|max(?:imum)?|<=|less\\s*than|no\\s*more\\s*than|capped(?:\\s*at)?)\\s*${num}`, 'i'));
   if (m) return { min: 0, max: toNumberLoose(m[1]) };
 
-  // over / at least / minimum / >= / more than
   m = t.match(new RegExp(`(?:over|at\\s*least|min(?:imum)?|>=|more\\s*than)\\s*${num}`, 'i'));
   if (m) return { min: toNumberLoose(m[1]), max: 0 };
 
-  // "price 1200", "cost around 900", "budget 1.2k", "spend 800"
   m = t.match(new RegExp(`(?:price|cost|budget|spend|around|about|~)\\s*${num}`, 'i'));
   if (m) return { min: 0, max: toNumberLoose(m[1]) };
 
   return null;
 }
-
-// Size-ish hints (loosely)
-const hasSizeHints = (t) =>
-  /\b(width|length|depth|height|cm|mm|\d{2,3}\s*x\s*\d{2,3})\b/i.test(t);
 
 // sanitize for flat payload (avoid breaking on ';' or '|')
 const sanitizeField = (s) => String(s ?? '').replace(/[;|]/g, '/');
@@ -163,9 +160,9 @@ Return ONLY minified JSON:
 }
 Rules:
 - Return plain numbers for all numeric fields (no units or commas).
-- Only set "suggest": true if the user is clearly asking for a recommendation or to see items, or if they specify constraints (budget/size).
-- Do NOT set "suggest": true for brand overviews, comparisons, or policy/logistics questions unless they explicitly ask to recommend/show/pick.
-- No extra text. No backticks. JSON only.`;
+- Only set "suggest": true if the user is clearly asking for a recommendation or to see items, or if they specify constraints (budget/size) alongside a product category (e.g., "sofa under 900").
+- Do NOT set "suggest": true for general brand overviews, comparisons, or policy/logistics questions unless they explicitly ask to recommend/show/pick.
+- No extra text. No backticks. JSON only.`.trim();
 
         let spec = {};
         try {
@@ -185,7 +182,7 @@ Rules:
           spec = {};
         }
 
-        // Heuristic backups & normalization
+        // Heuristic backups & normalization (manual, predictable)
         if (typeof spec !== 'object' || spec === null) spec = {};
         if (typeof spec.suggest !== 'boolean') spec.suggest = false;
         if (typeof spec.category !== 'string') spec.category = '';
@@ -194,31 +191,26 @@ Rules:
         const intentGuess = inferIntent(lower);
         const budgetGuess = !!extractBudget(user);
         const sizeGuess = hasSizeHints(user);
-        const brandInfo = brandInfoLike(user);
+        const brandInfo = brandInfoLike(user); // info/comparison/logistics
 
-        // Fill missing category if we can infer it
         if (!spec.category && catGuess) spec.category = catGuess;
 
-        // ----- FIX: don't auto-suggest from category alone -----
-        // If model didn't set suggest, only enable it when we see intent OR constraints.
+        // Strict suggest gate:
+        // - suggest only if explicit intent OR (constraints + category)
+        // - never suggest on brand/comparison/policy questions
         if (!spec.suggest) {
           const hasConstraint = budgetGuess || sizeGuess;
           const hasCategory = !!(spec.category || catGuess);
 
           if (brandInfo) {
-         spec.suggest = false; // force advice-only
-        } else if (intentGuess) {
-            spec.suggest = true;  // explicit "recommend/show/pick/find"
-         }    else if (hasConstraint && hasCategory) {
-        spec.suggest = true;  // e.g., "sofa under $900" (constraint + category)
+            spec.suggest = false;
+          } else if (intentGuess) {
+            spec.suggest = true;
+          } else if (hasConstraint && hasCategory) {
+            spec.suggest = true;
           } else {
-    spec.suggest = false; // e.g., "my budget is $900" (no category/intent)
-  }
-        }
-
-        // If this reads like a brand/comparison/policy question, force advice-only
-        if (brandInfo) {
-          spec.suggest = false;
+            spec.suggest = false;
+          }
         }
 
         // Style array
@@ -264,7 +256,7 @@ Rules:
           `max_len=${max_len};` +
           `max_w=${max_w};` +
           `max_h=${max_h};` +
-          `choice_id=;` +         // left empty for large catalogs (UE will pick)
+          `choice_id=;` +
           `choice_name=`;
 
         if (ws.readyState === ws.OPEN) ws.send('SPEC|' + flat);
@@ -275,12 +267,9 @@ Rules:
       if (!raw.startsWith('USER|')) return;
       const user = raw.slice(5);
 
-      // Optional nudge: policy-ish questions -> salesperson tone
-      const policyish = /\b(return|warranty|delivery|shipping|lead\s*time|availability|exchange|refund|policy)\b/i.test(user);
-      const userForModel = policyish ? `[BRAND_TONE]\n${user}` : user;
-
+      // Unified salesperson tone (no brand/policy nudge needed)
       const hist = histories.get(ws) || [];
-      const contents = buildContents(hist, userForModel);
+      const contents = buildContents(hist, user);
 
       const stream = await ai.models.generateContentStream({
         model: 'gemini-2.5-flash',
