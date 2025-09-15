@@ -15,8 +15,11 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FChatWSOnFinal, const FString&, Text
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FChatWSOnClosed, int32, StatusCode, const FString&, Reason);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FChatWSOnError, const FString&, Error);
 
-// Structured spec (JSON) for catalog picking
+// Structured spec (flat key=value;...) for catalog/model picking
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FChatWSOnSpecJson, const FString&, JsonSpec);
+
+// Structured matspec (flat key=value;...) for material picking
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FChatWSOnMatSpecJson, const FString&, FlatSpec);
 
 /**
  * WebSocket client for Roomie (Gemini) — Blueprint-friendly
@@ -49,9 +52,13 @@ public:
     UPROPERTY(BlueprintAssignable, Category = "ChatBot")
     FChatWSOnFinal OnChatFinal;
 
-    /** JSON spec for catalog selection (SPEC|{...}) */
+    /** Flat SPEC for catalog selection (SPEC|...) */
     UPROPERTY(BlueprintAssignable, Category = "ChatBot")
     FChatWSOnSpecJson OnSpecJson;
+
+    /** Flat MATSPEC for material selection (MATSPEC|...) */
+    UPROPERTY(BlueprintAssignable, Category = "ChatBot")
+    FChatWSOnMatSpecJson OnMatSpecJson;
 
     /** Closed / Error */
     UPROPERTY(BlueprintAssignable, Category = "ChatBot")
@@ -67,7 +74,7 @@ public:
     /** Send a chat turn to Gemini (will stream CHUNK + FINAL) */
     UFUNCTION(BlueprintCallable, Category = "ChatBot") void SendUserMessage(const FString& Text);
 
-    /** Ask server for structured JSON spec for catalog picking (SPEC|...) */
+    /** Legacy: Ask server for SPEC explicitly (normally not needed anymore) */
     UFUNCTION(BlueprintCallable, Category = "ChatBot") void RequestSpecFromText(const FString& Text);
 
     /** Is the socket connected? */

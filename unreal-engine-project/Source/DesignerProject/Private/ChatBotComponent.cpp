@@ -103,7 +103,7 @@ void UChatBotComponent::HandleConnected()
 
 void UChatBotComponent::HandleMessage(const FString& Msg)
 {
-    // Format expected: TYPE|payload  (TYPE in {CHUNK, FINAL, SPEC, ERROR})
+    // Format expected: TYPE|payload  (TYPE in {CHUNK, FINAL, SPEC, MATSPEC, ERROR})
     const int32 PipeIdx = Msg.Find(TEXT("|"));
     FString Type = Msg;
     FString Payload;
@@ -121,10 +121,12 @@ void UChatBotComponent::HandleMessage(const FString& Msg)
                 OnChatFinal.Broadcast(Payload);
             else if (Type.Equals(TEXT("SPEC"), ESearchCase::IgnoreCase))
                 OnSpecJson.Broadcast(Payload);
+            else if (Type.Equals(TEXT("MATSPEC"), ESearchCase::IgnoreCase))   // NEW: material spec
+                OnMatSpecJson.Broadcast(Payload);
             else if (Type.Equals(TEXT("ERROR"), ESearchCase::IgnoreCase))
                 OnError.Broadcast(Payload);
             else
-                OnChatChunk.Broadcast(Payload); // fallback
+                UE_LOG(LogChatBot, Verbose, TEXT("Unhandled WS type: %s | %s"), *Type, *Payload);
         });
 }
 
